@@ -1,87 +1,72 @@
-#include <Arduino.h>
+// Toggle a servo between 0 and 180 degrees each time a button is pressed.
 #include <Servo.h>
 
-// ===================== USER SETTINGS =====================
-// Choose ONE control style by setting true/false below.
-const bool USE_TOGGLE_BUTTON = true;   // Press once -> extend, press again -> retract
-const bool USE_LEVEL_SWITCH = false;   // Lever/slide switch: one position extend, other retract
+const int SERVO_PIN = 9;
+const int BUTTON_PIN = 2;
 
-// Pins (change these to whatever GPIO you want to use)
-const uint8_t CONTROL_PIN = 15;
-const uint8_t SERVO_PIN = 9;
+const int SERVO_HOME = 0;
+const int SERVO_EXTENDED = 180;
+const int SERVO_MIN_PULSE_US = 500;
+const int SERVO_MAX_PULSE_US = 2500;
 
-// Input polarity
-const bool CONTROL_ACTIVE_LOW = true;  // true for switch/button wired from GPIO to GND (with pull-up)
-// Engineering default: one control GPIO + one shared GND is standard for button input.
-// 3-pin SPDT slider can still be used; this code reads a single logic state on CONTROL_PIN.
+const unsigned long DEBOUNCE_MS = 50;
+const unsigned long STARTUP_QUIET_MS = 300;
+const unsigned long SERVO_ATTACH_SETTLE_MS = 20;
+const unsigned long SERVO_MOVE_SETTLE_MS = 650;
 
-// Only used in lever/slide switch mode:
-// true  -> active position means extended
-// false -> active position means retracted
-const bool SWITCH_ACTIVE_MEANS_EXTENDED = true;
+Servo deskServo;
 
-// Servo positions
-const int EXTENDED_ANGLE = 90;
-const int RETRACTED_ANGLE = 0;
-
-// Debounce timing
-const unsigned long DEBOUNCE_MS = 25;
-// ========================================================
-
-Servo pistonServo;
 bool isExtended = false;
+int currentAngle = SERVO_HOME;
+int lastButtonReading = HIGH;
+int stableButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
 
-bool isInputActive() {
-  int raw = digitalRead(CONTROL_PIN);
-  return CONTROL_ACTIVE_LOW ? (raw == LOW) : (raw == HIGH);
+void moveServoToAngle(int targetAngle) {
+	int clampedTarget = constrain(targetAngle, SERVO_HOME, SERVO_EXTENDED);
+
+	// Preload the target start position before attach to reduce first-pulse twitch.
+	deskServo.write(currentAngle);
+
+	if (!deskServo.attached()) {
+		// Calibrate pulse range so 0..180 maps closer to full mechanical travel.
+		deskServo.attach(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+		delay(SERVO_ATTACH_SETTLE_MS);
+	}
+
+	deskServo.write(clampedTarget);
+	delay(SERVO_MOVE_SETTLE_MS);
+	deskServo.detach();
+
+	currentAngle = clampedTarget;
 }
 
 void setup() {
-  if (USE_TOGGLE_BUTTON == USE_LEVEL_SWITCH) {
-    while (true) {
-      delay(1000);
-    }
-  }
+	pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  pinMode(CONTROL_PIN, CONTROL_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
-
-  pistonServo.attach(SERVO_PIN);
-  pistonServo.write(RETRACTED_ANGLE);
+	// Keep PWM off at startup to avoid the common boot twitch.
+	deskServo.detach();
+	delay(STARTUP_QUIET_MS);
 }
 
 void loop() {
-  if (USE_TOGGLE_BUTTON) {
-    if (isInputActive()) {
-      delay(DEBOUNCE_MS);
+	int reading = digitalRead(BUTTON_PIN);
 
-      if (isInputActive()) {
-        isExtended = !isExtended;
+	if (reading != lastButtonReading) {
+		lastDebounceTime = millis();
+	}
 
-        if (isExtended) {
-          pistonServo.write(EXTENDED_ANGLE);
-        } else {
-          pistonServo.write(RETRACTED_ANGLE);
-        }
+	if ((millis() - lastDebounceTime) > DEBOUNCE_MS) {
+		if (reading != stableButtonState) {
+			stableButtonState = reading;
 
-        // Wait for release to avoid retriggering
-        while (isInputActive()) {
-          delay(10);
-        }
-      }
-    }
-  } else {
-    bool active = isInputActive();
-    bool targetExtended = SWITCH_ACTIVE_MEANS_EXTENDED ? active : !active;
+			// Button press event (wired from pin to GND with INPUT_PULLUP).
+			if (stableButtonState == LOW) {
+				isExtended = !isExtended;
+				moveServoToAngle(isExtended ? SERVO_EXTENDED : SERVO_HOME);
+			}
+		}
+	}
 
-    if (targetExtended != isExtended) {
-      isExtended = targetExtended;
-      if (isExtended) {
-        pistonServo.write(EXTENDED_ANGLE);
-      } else {
-        pistonServo.write(RETRACTED_ANGLE);
-      }
-    }
-  }
-
-  delay(10);
+	lastButtonReading = reading;
 }
